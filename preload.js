@@ -1,4 +1,10 @@
 const { ipcRenderer, clipboard } = require('electron');
+const os = require('os');
+const path = require('path');
+
+const userHome = os.homedir();
+const userMusicDir = path.join(userHome, 'Music');
+const userCacheDir = path.join(userHome, '.cache', 'netease-cloud-music');
 
 window._enterAppTime = Date.now();
 window.withDevServer = false;
@@ -222,7 +228,7 @@ const channelObj = {
     }
 
     if (command === 'app.getDefaultMusicPlayPath') {
-      return cb('/home/shawn/Music');
+      return cb(userMusicDir);
     }
 
     if (command === 'app.getAppStartCommand') {
@@ -354,7 +360,7 @@ const channelObj = {
 
     // Storage & Database
     if (command === 'storage.init') {
-      return cb('/home/shawn/Music', '/home/shawn/.cache/netease-cloud-music');
+      return cb(userMusicDir, userCacheDir);
     }
 
     if (command === 'storage.execsql' || command === 'storage.exectransaction') {
@@ -408,7 +414,7 @@ const channelObj = {
     }
 
     if (command === 'storage.getSystemDir') {
-      return cb({ path: '/home/shawn/Music' });
+      return cb({ path: userMusicDir });
     }
 
     if (command === 'storage.playCacheInfo') {

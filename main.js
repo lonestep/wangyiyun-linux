@@ -311,7 +311,6 @@ ipcMain.handle('cookie-get', async () => {
   for (const [name, item] of cookieJar.entries()) {
     obj[name] = item.Value;
   }
-  obj.toString = () => Object.entries(obj).map(([k, v]) => `${k}=${v}`).join('; ');
   return obj;
 });
 
