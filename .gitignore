@@ -1,0 +1,18 @@
+# Build outputs
+dist/
+build/
+RPMS/
+SRPMS/
+
+# Dependencies
+node_modules/
+
+# Runtime data & caches
+*.log
+.cache/
+ImageCache/
+cookies.json
+
+# OS files
+.DS_Store
+Thumbs.db
