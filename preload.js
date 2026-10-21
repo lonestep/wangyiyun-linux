@@ -93,7 +93,212 @@ try {
   if (saved) Object.assign(configStorage, JSON.parse(saved));
 } catch (e) {}
 
+const tempStorage = new Map();
+const fileStorage = new Map();
+
 const eventListeners = {};
+
+// Desktop Lyric Floating Overlay Engine
+let desktopLyricVisible = false;
+let desktopLyricLocked = false;
+let desktopLyricLines = [];
+let desktopTransLines = [];
+let desktopLyricOffsetMs = 0;
+let desktopLyricSlogan = '网易云音乐';
+let desktopLyricSongTitle = '';
+let desktopLyricEl = null;
+let desktopLyricMainTextEl = null;
+let desktopLyricSubTextEl = null;
+
+function parseLrcText(rawLrc) {
+  if (!rawLrc || typeof rawLrc !== 'string') return [];
+  const result = [];
+  const lines = rawLrc.split(/\r?\n/);
+  const timeReg = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
+  for (const line of lines) {
+    const text = line.replace(timeReg, '').trim();
+    let match;
+    timeReg.lastIndex = 0;
+    while ((match = timeReg.exec(line)) !== null) {
+      const min = parseInt(match[1], 10) || 0;
+      const sec = parseInt(match[2], 10) || 0;
+      const fracStr = match[3] || '0';
+      const frac = parseInt(fracStr.padEnd(3, '0').slice(0, 3), 10) || 0;
+      const timeSec = min * 60 + sec + frac / 1000;
+      if (text) {
+        result.push({ time: timeSec, text });
+      }
+    }
+  }
+  result.sort((a, b) => a.time - b.time);
+  return result;
+}
+
+function ensureDesktopLyricDom() {
+  if (desktopLyricEl || !document.body) return desktopLyricEl;
+
+  const container = document.createElement('div');
+  container.id = 'ncm-linux-desktop-lyric';
+  container.style.cssText = [
+    'position: fixed',
+    'left: 50%',
+    'bottom: 84px',
+    'transform: translateX(-50%)',
+    'min-width: 420px',
+    'max-width: 78vw',
+    'padding: 10px 28px',
+    'border-radius: 10px',
+    'background: rgba(20, 20, 24, 0.72)',
+    'backdrop-filter: blur(8px)',
+    'box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35)',
+    'z-index: 99999',
+    'text-align: center',
+    'user-select: none',
+    'cursor: move',
+    'display: none',
+    'transition: background 0.2s ease'
+  ].join(';');
+
+  const closeBtn = document.createElement('div');
+  closeBtn.textContent = '×';
+  closeBtn.title = '关闭桌面歌词';
+  closeBtn.style.cssText = [
+    'position: absolute',
+    'top: 4px',
+    'right: 10px',
+    'font-size: 18px',
+    'line-height: 18px',
+    'color: rgba(255, 255, 255, 0.65)',
+    'cursor: pointer',
+    'padding: 2px 4px'
+  ].join(';');
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setDesktopLyricVisible(false);
+    channelObj.emit('player.ondesktoplyricaction', 'close');
+  });
+
+  const mainLine = document.createElement('div');
+  mainLine.style.cssText = [
+    'font-size: 20px',
+    'font-weight: 600',
+    'line-height: 1.4',
+    'color: #ff6b6b',
+    'text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85)',
+    'white-space: nowrap',
+    'overflow: hidden',
+    'text-overflow: ellipsis'
+  ].join(';');
+  mainLine.textContent = desktopLyricSlogan;
+
+  const subLine = document.createElement('div');
+  subLine.style.cssText = [
+    'font-size: 14px',
+    'font-weight: 400',
+    'line-height: 1.35',
+    'margin-top: 4px',
+    'color: rgba(255, 255, 255, 0.85)',
+    'text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8)',
+    'white-space: nowrap',
+    'overflow: hidden',
+    'text-overflow: ellipsis'
+  ].join(';');
+
+  container.appendChild(closeBtn);
+  container.appendChild(mainLine);
+  container.appendChild(subLine);
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let origLeft = 0;
+  let origTop = 0;
+
+  container.addEventListener('mousedown', (e) => {
+    if (desktopLyricLocked || e.target === closeBtn) return;
+    dragging = true;
+    const rect = container.getBoundingClientRect();
+    origLeft = rect.left;
+    origTop = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    container.style.transform = 'none';
+    container.style.left = `${origLeft}px`;
+    container.style.top = `${origTop}px`;
+    container.style.bottom = 'auto';
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    container.style.left = `${Math.max(0, Math.min(window.innerWidth - 100, origLeft + dx))}px`;
+    container.style.top = `${Math.max(0, Math.min(window.innerHeight - 50, origTop + dy))}px`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    dragging = false;
+  });
+
+  document.body.appendChild(container);
+  desktopLyricEl = container;
+  desktopLyricMainTextEl = mainLine;
+  desktopLyricSubTextEl = subLine;
+  return desktopLyricEl;
+}
+
+function setDesktopLyricVisible(visible) {
+  desktopLyricVisible = Boolean(visible);
+  const el = ensureDesktopLyricDom();
+  if (el) {
+    el.style.display = desktopLyricVisible ? 'block' : 'none';
+    if (desktopLyricVisible) updateDesktopLyricProgress(audioEl ? audioEl.currentTime : 0);
+  }
+}
+
+function updateDesktopLyricProgress(curSec) {
+  if (!desktopLyricVisible) return;
+  const el = ensureDesktopLyricDom();
+  if (!el || !desktopLyricMainTextEl || !desktopLyricSubTextEl) return;
+
+  if (!desktopLyricLines.length) {
+    desktopLyricMainTextEl.textContent = desktopLyricSongTitle || desktopLyricSlogan || '网易云音乐';
+    desktopLyricSubTextEl.textContent = '';
+    return;
+  }
+
+  const effectiveTime = (curSec || 0) - (desktopLyricOffsetMs / 1000);
+  let idx = -1;
+  for (let i = 0; i < desktopLyricLines.length; i++) {
+    if (effectiveTime >= desktopLyricLines[i].time) {
+      idx = i;
+    } else {
+      break;
+    }
+  }
+
+  if (idx === -1) {
+    desktopLyricMainTextEl.textContent = desktopLyricLines[0].text;
+    desktopLyricSubTextEl.textContent = desktopLyricLines[1] ? desktopLyricLines[1].text : '';
+    return;
+  }
+
+  const curLine = desktopLyricLines[idx];
+  desktopLyricMainTextEl.textContent = curLine ? curLine.text : '';
+
+  if (desktopTransLines.length > 0 && curLine) {
+    let transText = '';
+    for (let j = 0; j < desktopTransLines.length; j++) {
+      if (Math.abs(desktopTransLines[j].time - curLine.time) < 0.8) {
+        transText = desktopTransLines[j].text;
+        break;
+      }
+    }
+    desktopLyricSubTextEl.textContent = transText || (desktopLyricLines[idx + 1] ? desktopLyricLines[idx + 1].text : '');
+  } else {
+    desktopLyricSubTextEl.textContent = desktopLyricLines[idx + 1] ? desktopLyricLines[idx + 1].text : '';
+  }
+}
 
 // HTML5 Audio Engine for Linux
 let audioEl = null;
@@ -127,6 +332,13 @@ function getAudio() {
     audioEl.addEventListener('timeupdate', () => {
       const curSec = audioEl.currentTime || 0;
       channelObj.emit('audioplayer.onPlayProgress', currentPlayId, curSec, 1.0, false);
+      updateDesktopLyricProgress(curSec);
+    });
+
+    audioEl.addEventListener('seeked', () => {
+      const curSec = audioEl.currentTime || 0;
+      channelObj.emit('audioplayer.onPlayProgress', currentPlayId, curSec, 1.0, true);
+      updateDesktopLyricProgress(curSec);
     });
 
     audioEl.addEventListener('loadedmetadata', () => {
@@ -470,6 +682,10 @@ const channelObj = {
 
     if (command === 'winhelper.SetNativeWindowShow' || command === 'winhelper.setNativeWindowShow') {
       const [name, visible] = params;
+      if (name === 'desktop_lyrics' || name === 'inline_lyrics') {
+        setDesktopLyricVisible(Boolean(visible));
+        return cb(true);
+      }
       if (visible === false) ipcRenderer.send('window-min');
       else ipcRenderer.send('window-restore');
       return cb(true);
@@ -526,16 +742,48 @@ const channelObj = {
       return cb(true);
     }
 
+    if (command === 'storage.updatetemp') {
+      const [key, content] = params;
+      if (key !== undefined && key !== null) {
+        if (tempStorage.size >= 200) {
+          const firstKey = tempStorage.keys().next().value;
+          if (firstKey !== undefined) tempStorage.delete(firstKey);
+        }
+        tempStorage.set(String(key), typeof content === 'string' ? content : JSON.stringify(content || {}));
+      }
+      return cb(true);
+    }
+
+    if (command === 'storage.getTempFile') {
+      const key = String(params[0] !== undefined ? params[0] : '');
+      const cached = tempStorage.get(key);
+      setTimeout(() => {
+        if (cached !== undefined) {
+          channelObj.emit('storage.ongettempfile', params[0], 0, cached);
+        } else {
+          channelObj.emit('storage.ongettempfile', params[0], 404, '');
+        }
+      }, 0);
+      return cb(true);
+    }
+
     if (command === 'storage.readfromfile') {
       const id = params[0];
+      const filePath = String(params[1] || '');
+      const content = fileStorage.has(filePath) ? fileStorage.get(filePath) : '';
       setTimeout(() => {
-        channelObj.emit('storage.onreadfromfiledone', id, 0, '');
+        channelObj.emit('storage.onreadfromfiledone', id, 0, content);
       }, 0);
       return cb(true);
     }
 
     if (command === 'storage.savetofile') {
       const id = params[0];
+      const content = String(params[1] || '');
+      const filePath = String(params[3] || '');
+      if (filePath) {
+        fileStorage.set(filePath, content);
+      }
       setTimeout(() => {
         channelObj.emit('storage.onsavetofiledone', id, 0);
       }, 0);
@@ -544,18 +792,54 @@ const channelObj = {
 
     if (command === 'storage.deletefile') {
       const id = params[0];
+      const filePath = String(params[3] || '');
+      if (filePath) fileStorage.delete(filePath);
       setTimeout(() => {
+        channelObj.emit('storage.ondeletefilesdone', id, 0, filePath || true);
         channelObj.emit('storage.ondeletefiledone', id, 0, true);
       }, 0);
       return cb(true);
     }
 
-    if (command === 'storage.queryCacheTracks' || command === 'storage.queryNewCacheTracks') {
+    if (command === 'storage.listFile') {
+      const id = params[0];
       setTimeout(() => {
-        channelObj.emit(
-          command === 'storage.queryCacheTracks' ? 'storage.onquerycachetracks' : 'storage.onquerynewcachetracks',
-          { cachedTrackMap: {}, cachedVoiceMap: {}, total: 0 }
-        );
+        channelObj.emit('storage.onlistfile', id, 0, []);
+      }, 0);
+      return cb(true);
+    }
+
+    if (command === 'storage.clearCache') {
+      setTimeout(() => {
+        channelObj.emit('storage.onclearcache', true);
+      }, 0);
+      return cb(true);
+    }
+
+    if (command === 'storage.imagesInfo') {
+      const id = params[0];
+      setTimeout(() => {
+        channelObj.emit('storage.onImagesInfo', id, []);
+      }, 0);
+      return cb(true);
+    }
+
+    if (command === 'storage.checkFilesExist') {
+      const id = params[0];
+      setTimeout(() => {
+        channelObj.emit('storage.oncheckfilesexist', id, true, []);
+      }, 0);
+      return cb(true);
+    }
+
+    if (command === 'storage.queryCacheTracks' || command === 'storage.queryNewCacheTracks') {
+      const id = params[0];
+      setTimeout(() => {
+        if (command === 'storage.queryCacheTracks') {
+          channelObj.emit('storage.onquerycachetracks', { cachedTrackMap: {}, cachedVoiceMap: {}, total: 0 });
+        } else {
+          channelObj.emit('storage.onquerynewcachetracks', id, []);
+        }
       }, 0);
       return cb(true);
     }
@@ -568,12 +852,88 @@ const channelObj = {
       return cb({ size: 0, max: 1024 * 1024 * 1024 });
     }
 
-    if (command === 'storage.setPlayCacheConfig' || command === 'trayicon.wasInstall') {
+    if (command === 'storage.setPlayCacheConfig') {
+      setTimeout(() => {
+        channelObj.emit('storage.onsetPlayCacheConfig', { code: 0 });
+      }, 0);
+      return cb(true);
+    }
+
+    if (command === 'trayicon.wasInstall') {
       return cb(true);
     }
 
     if (command === 'update.getCachedInstallPackageVersion') {
       return cb('');
+    }
+
+    if (command === 'update.getDownloadVersion') {
+      const id = params[0];
+      setTimeout(() => {
+        channelObj.emit('update.onGetDownloadVersion', id, '');
+      }, 0);
+      return cb(true);
+    }
+
+    // Desktop Lyric & Player Lyric Bridge
+    if (command === 'player.setLyrics') {
+      const data = params[0] || {};
+      desktopLyricLines = parseLrcText(data.lrc || '');
+      desktopTransLines = parseLrcText(data.tlrc || '');
+      updateDesktopLyricProgress(audioEl ? audioEl.currentTime : 0);
+      return cb(true);
+    }
+
+    if (command === 'player.setInfo') {
+      const info = params[0] || {};
+      if (info.songName) {
+        desktopLyricSongTitle = info.artistName ? `${info.songName} - ${info.artistName}` : info.songName;
+      }
+      updateDesktopLyricProgress(audioEl ? audioEl.currentTime : 0);
+      return cb(true);
+    }
+
+    if (command === 'player.setOffset') {
+      desktopLyricOffsetMs = Number(params[0]) || 0;
+      updateDesktopLyricProgress(audioEl ? audioEl.currentTime : 0);
+      return cb(true);
+    }
+
+    if (command === 'player.setLRCSlogan') {
+      desktopLyricSlogan = String(params[0] || '网易云音乐');
+      desktopLyricLines = [];
+      desktopTransLines = [];
+      updateDesktopLyricProgress(0);
+      return cb(true);
+    }
+
+    if (command === 'player.setLRCEmpty' || command === 'player.setMusicOnly' || command === 'player.setLRCDJ') {
+      desktopLyricSlogan = command === 'player.setMusicOnly' ? '纯音乐，请欣赏' : '暂无歌词';
+      desktopLyricLines = [];
+      desktopTransLines = [];
+      updateDesktopLyricProgress(0);
+      return cb(true);
+    }
+
+    if (command === 'player.showHorizontalLyric') {
+      return cb(true);
+    }
+
+    if (command === 'player.setLock') {
+      desktopLyricLocked = Boolean(params[0]);
+      return cb(true);
+    }
+
+    if (command === 'player.renderLRCImage') {
+      const imgPath = params[1] || '';
+      setTimeout(() => {
+        channelObj.emit('player.onRenderLRCImageResult', imgPath, true, 400, 80);
+      }, 0);
+      return cb(true);
+    }
+
+    if (command.startsWith('player.')) {
+      return cb(true);
     }
 
     // Audio Playback
@@ -662,6 +1022,14 @@ const channelObj = {
         channelObj.emit('audioplayer.onCheckDeviceMute', false, false);
       }, 0);
       return cb(false);
+    }
+
+    if (command === 'audioplayer.enmeratorDevices') {
+      const act = params[0] || 'getOutDevices';
+      setTimeout(() => {
+        channelObj.emit('audioplayer.onEnmeratorDevices', act, [], 'default');
+      }, 0);
+      return cb(true);
     }
 
     if (command === 'audioplayer.getSystemMasterVolume' || command === 'audioplayer.getApplicationVolume') {

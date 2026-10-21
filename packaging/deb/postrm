@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  rm -f /usr/bin/netease-cloud-music
+  rm -f /etc/apparmor.d/netease-cloud-music
+  rm -f /etc/skel/Desktop/netease-cloud-music.desktop
+  rm -f /root/Desktop/netease-cloud-music.desktop /root/桌面/netease-cloud-music.desktop
+  for home_dir in /home/*; do
+    if [ -d "$home_dir" ]; then
+      rm -f "$home_dir/Desktop/netease-cloud-music.desktop" "$home_dir/桌面/netease-cloud-music.desktop"
+    fi
+  done
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+exit 0
