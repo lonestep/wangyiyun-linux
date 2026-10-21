@@ -1,0 +1,147 @@
+#!/bin/sh
+set -e
+
+DESKTOP_SRC="/usr/share/applications/netease-cloud-music.desktop"
+
+ln -sf /opt/netease-cloud-music/netease-cloud-music /usr/bin/netease-cloud-music
+
+if [ -f /opt/netease-cloud-music/chrome-sandbox ]; then
+  chown root:root /opt/netease-cloud-music/chrome-sandbox 2>/dev/null || true
+  chmod 4755 /opt/netease-cloud-music/chrome-sandbox 2>/dev/null || true
+fi
+
+# Ubuntu 24.04+ (AppArmor 4.0) restricts unprivileged user namespaces by default.
+# Install AppArmor profile dynamically only when AppArmor 4.0 ABI is present
+# so Ubuntu 22.04 (AppArmor 3.0) does not encounter unknown 'userns' syntax.
+if [ -f /etc/apparmor.d/abi/4.0 ]; then
+  cat << 'EOF' > /etc/apparmor.d/netease-cloud-music
+abi <abi/4.0>,
+include <tunables/global>
+
+profile netease-cloud-music /opt/netease-cloud-music/netease-cloud-music-bin flags=(unconfined) {
+  userns,
+  include if exists <local/netease-cloud-music>
+}
+EOF
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r -T -W /etc/apparmor.d/netease-cloud-music >/dev/null 2>&1 || true
+  fi
+fi
+
+# Install desktop shortcut for a given user home directory
+install_user_shortcut() {
+  user_home="$1"
+  user_name="$2"
+  [ -d "$user_home" ] || return 0
+  [ -f "$DESKTOP_SRC" ] || return 0
+
+  desktop_dir=""
+  if [ -f "$user_home/.config/user-dirs.dirs" ]; then
+    xdg_val="$(grep -E '^XDG_DESKTOP_DIR=' "$user_home/.config/user-dirs.dirs" | tail -n 1 | cut -d= -f2- | tr -d '"')"
+    if [ -n "$xdg_val" ]; then
+      desktop_dir="$(echo "$xdg_val" | sed "s|\$HOME|$user_home|g")"
+    fi
+  fi
+
+  if [ -z "$desktop_dir" ]; then
+    if [ -d "$user_home/桌面" ]; then
+      desktop_dir="$user_home/桌面"
+    else
+      desktop_dir="$user_home/Desktop"
+    fi
+  fi
+
+  mkdir -p "$desktop_dir" 2>/dev/null || true
+  if [ -d "$desktop_dir" ]; then
+    target_desktop="$desktop_dir/netease-cloud-music.desktop"
+    cp -f "$DESKTOP_SRC" "$target_desktop"
+    chmod 0755 "$target_desktop"
+    if [ -n "$user_name" ] && id "$user_name" >/dev/null 2>&1; then
+      user_group="$(id -gn "$user_name" 2>/dev/null || echo "$user_name")"
+      chown "$user_name:$user_group" "$desktop_dir" "$target_desktop" 2>/dev/null || true
+      if command -v gio >/dev/null 2>&1; then
+        su - "$user_name" -c "gio set '$target_desktop' metadata::trusted true" >/dev/null 2>&1 || true
+      fi
+      if [ -d "$user_home/.local" ]; then
+        chown -R "$user_name:$user_group" "$user_home/.local" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+# Create template shortcut in /etc/skel/Desktop for future users
+if [ -f "$DESKTOP_SRC" ]; then
+  mkdir -p /etc/skel/Desktop 2>/dev/null || true
+  cp -f "$DESKTOP_SRC" /etc/skel/Desktop/netease-cloud-music.desktop 2>/dev/null || true
+  chmod 0755 /etc/skel/Desktop/netease-cloud-music.desktop 2>/dev/null || true
+fi
+
+# Install shortcut for root and all users in /home
+install_user_shortcut "/root" "root"
+for home_dir in /home/*; do
+  if [ -d "$home_dir" ]; then
+    u_name="$(basename "$home_dir")"
+    install_user_shortcut "$home_dir" "$u_name"
+  fi
+done
+
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+  if [ -n "$sudo_home" ] && [ -d "$sudo_home" ]; then
+    install_user_shortcut "$sudo_home" "$SUDO_USER"
+  fi
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+DESKTOP_SRC="/usr/share/applications/netease-cloud-music.desktop"
+if [ -f "$DESKTOP_SRC" ]; then
+  chmod 0755 "$DESKTOP_SRC" 2>/dev/null || true
+  for USER_HOME in /home/*; do
+    [ -d "$USER_HOME" ] || continue
+    USER_NAME="$(basename "$USER_HOME")"
+    id "$USER_NAME" >/dev/null 2>&1 || continue
+    USER_UID="$(id -u "$USER_NAME" 2>/dev/null || true)"
+    USER_GID="$(id -g "$USER_NAME" 2>/dev/null || true)"
+
+    USER_APPS="$USER_HOME/.local/share/applications"
+    mkdir -p "$USER_APPS" 2>/dev/null || true
+    cp -f "$DESKTOP_SRC" "$USER_APPS/netease-cloud-music.desktop" 2>/dev/null || true
+    chmod 0755 "$USER_APPS/netease-cloud-music.desktop" 2>/dev/null || true
+    [ -n "$USER_UID" ] && chown "$USER_UID:$USER_GID" "$USER_APPS" "$USER_APPS/netease-cloud-music.desktop" 2>/dev/null || true
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database -q "$USER_APPS" 2>/dev/null || true
+    fi
+
+    DESKTOP_DIR=""
+    if [ -f "$USER_HOME/.config/user-dirs.dirs" ]; then
+      REL_DESK="$(grep -E '^XDG_DESKTOP_DIR=' "$USER_HOME/.config/user-dirs.dirs" | tail -n 1 | cut -d= -f2- | tr -d '"' | sed "s|\$HOME|$USER_HOME|g")"
+      [ -n "$REL_DESK" ] && [ -d "$REL_DESK" ] && DESKTOP_DIR="$REL_DESK"
+    fi
+    if [ -z "$DESKTOP_DIR" ]; then
+      if [ -d "$USER_HOME/Desktop" ]; then
+        DESKTOP_DIR="$USER_HOME/Desktop"
+      elif [ -d "$USER_HOME/桌面" ]; then
+        DESKTOP_DIR="$USER_HOME/桌面"
+      fi
+    fi
+
+    if [ -n "$DESKTOP_DIR" ] && [ -d "$DESKTOP_DIR" ]; then
+      DESK_FILE="$DESKTOP_DIR/netease-cloud-music.desktop"
+      cp -f "$DESKTOP_SRC" "$DESK_FILE" 2>/dev/null || true
+      chmod 0755 "$DESK_FILE" 2>/dev/null || true
+      [ -n "$USER_UID" ] && chown "$USER_UID:$USER_GID" "$DESK_FILE" 2>/dev/null || true
+      if [ -n "$USER_UID" ] && [ -S "/run/user/$USER_UID/bus" ] && command -v gio >/dev/null 2>&1; then
+        su - "$USER_NAME" -c "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus gio set '$DESK_FILE' metadata::trusted true" >/dev/null 2>&1 || true
+      fi
+    fi
+  done
+fi
+
+exit 0

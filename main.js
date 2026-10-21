@@ -106,12 +106,20 @@ function syncCookiesToSession() {
   }
 }
 
+if (process.platform === 'linux' && typeof app.setDesktopName === 'function') {
+  app.setDesktopName('netease-cloud-music.desktop');
+}
+
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-dev-shm-usage');
 app.commandLine.appendSwitch('disable-gpu-sandbox');
+app.commandLine.appendSwitch('disable-setuid-sandbox');
 app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('ozone-platform', 'x11');
+app.commandLine.appendSwitch('ozone-platform', process.env.NCM_OZONE_PLATFORM || 'x11');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+if (!process.env.NCM_USE_SYSTEM_PROXY) {
+  app.commandLine.appendSwitch('no-proxy-server');
+}
 
 const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
@@ -283,7 +291,16 @@ ipcMain.on('launch-window', (_, { url, options }) => {
   });
 
   subWindows.add(subWin);
-  subWin.on('closed', () => subWindows.delete(subWin));
+  subWin.on('closed', () => {
+    subWindows.delete(subWin);
+    if (subWindows.size === 0 && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript(`
+        try {
+          document.querySelectorAll('[class*="LoginMask"], [class*="loginMask"]').forEach(el => { el.style.display = 'none'; });
+        } catch (e) {}
+      `).catch(() => {});
+    }
+  });
   subWin.webContents.setUserAgent(
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 NMusic/3.1.40.205461 NeteaseMusicDesktop/3.1.40.205461'
   );
@@ -421,7 +438,12 @@ ipcMain.handle('net-fetch', async (_, opts) => {
   }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (!process.env.NCM_USE_SYSTEM_PROXY) {
+    try {
+      await session.defaultSession.setProxy({ mode: 'direct' });
+    } catch (e) {}
+  }
   loadCookies();
   syncCookiesToSession();
 

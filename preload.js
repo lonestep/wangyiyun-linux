@@ -1,15 +1,57 @@
 const { ipcRenderer, clipboard } = require('electron');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+
+const EAPI_KEY = Buffer.from('e82ckenh8dichen8', 'utf8');
+const CACHE_KEY = Buffer.from(')(13daqP@ssw0rd~', 'utf8');
 
 const userHome = os.homedir();
 const userMusicDir = path.join(userHome, 'Music');
 const userCacheDir = path.join(userHome, '.cache', 'netease-cloud-music');
 
+function detectLinuxDistro() {
+  const info = {
+    prettyName: 'Linux',
+    id: 'linux',
+    versionId: ''
+  };
+  try {
+    if (fs.existsSync('/etc/os-release')) {
+      const content = fs.readFileSync('/etc/os-release', 'utf-8');
+      for (const line of content.split(/\r?\n/)) {
+        const [k, ...rest] = line.split('=');
+        if (!k || !rest.length) continue;
+        const val = rest.join('=').trim().replace(/^["']|["']$/g, '');
+        if (k === 'PRETTY_NAME' && val) info.prettyName = val;
+        if (k === 'ID' && val) info.id = val.toLowerCase();
+        if (k === 'VERSION_ID' && val) info.versionId = val;
+      }
+    }
+  } catch (e) {}
+  return info;
+}
+
+const linuxDistro = detectLinuxDistro();
+const distroSlug = `${linuxDistro.id}${linuxDistro.versionId ? '-' + linuxDistro.versionId : ''}`.replace(/[^a-z0-9.-]/gi, '-');
+
 window._enterAppTime = Date.now();
 window.withDevServer = false;
 window.isElectron = true;
 window.DESKTOP_SOURCE = 'pc';
+
+function tryExtractLoginCookies(text) {
+  try {
+    if (!text || typeof text !== 'string') return;
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return;
+    const data = JSON.parse(trimmed);
+    if (data && (data.code === 803 || data.code === 200) && data.cookie) {
+      ipcRenderer.invoke('cookie-inject-raw', data.cookie).catch(() => {});
+    }
+  } catch (e) {}
+}
 
 // Intercept window.fetch to capture QR code login cookies
 const origFetch = window.fetch;
@@ -17,13 +59,9 @@ window.fetch = async function(...args) {
   const res = await origFetch.apply(this, args);
   try {
     const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-    if (url.includes('/api/login/qrcode/client/login') || url.includes('/api/login')) {
+    if (url.includes('/login')) {
       const clone = res.clone();
-      clone.json().then(data => {
-        if (data && (data.code === 803 || data.code === 200) && data.cookie) {
-          ipcRenderer.invoke('cookie-inject-raw', data.cookie);
-        }
-      }).catch(() => {});
+      clone.text().then(text => tryExtractLoginCookies(text)).catch(() => {});
     }
   } catch (e) {}
   return res;
@@ -41,14 +79,8 @@ XMLHttpRequest.prototype.send = function(body) {
   this.addEventListener('load', function() {
     try {
       const url = String(this._reqUrl || '');
-      if (url.includes('/api/login') || url.includes('/api/w/login')) {
-        const text = this.responseText;
-        if (text && (text.startsWith('{') || text.startsWith('['))) {
-          const data = JSON.parse(text);
-          if (data && (data.code === 803 || data.code === 200) && data.cookie) {
-            ipcRenderer.invoke('cookie-inject-raw', data.cookie);
-          }
-        }
+      if (url.includes('/login')) {
+        tryExtractLoginCookies(this.responseText);
       }
     } catch (e) {}
   });
@@ -122,11 +154,114 @@ const channelObj = {
 
   enData: function(data) { return data || ''; },
   deData: function(data) { return data || ''; },
-  encodeAnonymousId: function(id) { return id || 'centos-stream-anon-001'; },
-  deSerialData: function(data) { return data || ''; },
-  serialData: function(data) { return data || ''; },
-  serialKey: function(key) { return key || ''; },
-  encryptId: function(id) { return id || ''; },
+  encodeAnonymousId: function(id) {
+    try {
+      const deviceId = String(id || `${distroSlug}-linux-device-001`);
+      const key = Buffer.from('3go8&$8*3*3h0k(2)2', 'utf8');
+      const idBuf = Buffer.from(deviceId, 'utf8');
+      const xored = Buffer.alloc(idBuf.length);
+      for (let i = 0; i < idBuf.length; i++) {
+        xored[i] = idBuf[i] ^ key[i % key.length];
+      }
+      const md5Base64 = crypto.createHash('md5').update(xored).digest('base64');
+      return Buffer.from(`${deviceId} ${md5Base64}`, 'utf8').toString('base64');
+    } catch (e) {
+      return id || `${distroSlug}-anon-001`;
+    }
+  },
+
+  deSerialData: function(data) {
+    if (!data) return '{}';
+    try {
+      if (typeof data === 'string') {
+        const trimmed = data.trim();
+        if ((trimmed.startsWith('{') || trimmed.startsWith('['))) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && (parsed.code === 803 || parsed.code === 200) && parsed.cookie) {
+              return ipcRenderer.invoke('cookie-inject-raw', parsed.cookie).catch(() => {}).then(() => trimmed);
+            }
+            return trimmed;
+          } catch (e) {}
+        }
+      }
+
+      let buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'latin1');
+      let out = '';
+      try {
+        const decipher = crypto.createDecipheriv('aes-128-ecb', EAPI_KEY, null);
+        out = Buffer.concat([decipher.update(buf), decipher.final()]).toString('utf8');
+      } catch (e1) {
+        if (typeof data === 'string' && /^[0-9a-fA-F]+$/.test(data.trim())) {
+          const hexBuf = Buffer.from(data.trim(), 'hex');
+          const decipher = crypto.createDecipheriv('aes-128-ecb', EAPI_KEY, null);
+          out = Buffer.concat([decipher.update(hexBuf), decipher.final()]).toString('utf8');
+        } else {
+          return typeof data === 'string' ? data : '{}';
+        }
+      }
+
+      try {
+        const parsed = JSON.parse(out);
+        if (parsed && (parsed.code === 803 || parsed.code === 200) && parsed.cookie) {
+          return ipcRenderer.invoke('cookie-inject-raw', parsed.cookie).catch(() => {}).then(() => out);
+        }
+      } catch (e) {}
+
+      return out;
+    } catch (e) {
+      return typeof data === 'string' ? data : '{}';
+    }
+  },
+
+  serialData: function(args) {
+    try {
+      if (!args) return '';
+      let url = '';
+      let text = '';
+      if (Array.isArray(args)) {
+        url = String(args[0] || '');
+        text = typeof args[1] === 'string' ? args[1] : JSON.stringify(args[1] || {});
+      } else if (typeof args === 'string') {
+        return args;
+      } else {
+        text = JSON.stringify(args);
+      }
+      url = url.replace(/^https?:\/\/[^/]+/, '').replace(/^\/eapi\//, '/api/');
+      const message = `nobody${url}use${text}md5forencrypt`;
+      const digest = crypto.createHash('md5').update(message, 'utf8').digest('hex');
+      const data = `${url}-36cd479b6b5-${text}-36cd479b6b5-${digest}`;
+      const cipher = crypto.createCipheriv('aes-128-ecb', EAPI_KEY, null);
+      return Buffer.concat([cipher.update(data, 'utf8'), cipher.final()]).toString('hex').toUpperCase();
+    } catch (e) {
+      return '';
+    }
+  },
+
+  serialKey: function(key) {
+    try {
+      if (!key) return '';
+      const text = typeof key === 'string' ? key : JSON.stringify(key);
+      const cipher = crypto.createCipheriv('aes-128-ecb', CACHE_KEY, null);
+      return Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]).toString('base64');
+    } catch (e) {
+      return '';
+    }
+  },
+
+  encryptId: function(id) {
+    try {
+      if (!id) return '';
+      const magic = Buffer.from('3go8&$8*3*3h0k(2)2', 'utf8');
+      const bytes = Buffer.from(String(id), 'utf8');
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = bytes[i] ^ magic[i % magic.length];
+      }
+      return crypto.createHash('md5').update(bytes).digest('base64').replace(/\//g, '_').replace(/\+/g, '-');
+    } catch (e) {
+      return String(id || '');
+    }
+  },
 
   registerCall: function(cmdEvent, callback) {
     if (!eventListeners[cmdEvent]) eventListeners[cmdEvent] = [];
@@ -167,7 +302,7 @@ const channelObj = {
     if (command === 'os.getSystemInfo' || command === 'os.computerSystemInfo') {
       return cb({
         os: 'linux',
-        version: 'CentOS Stream 10',
+        version: linuxDistro.prettyName,
         arch: 'x64',
         platform: 'linux',
         workArea: {
@@ -179,12 +314,16 @@ const channelObj = {
       });
     }
 
+    if (command === 'os.queryOs') {
+      return cb('pc');
+    }
+
     if (command === 'os.queryOsVer') {
       return cb('10.15.7');
     }
 
     if (command === 'os.getDeviceId' || command === 'os.getADDeviceID') {
-      return cb('centos-stream-linux-device-001');
+      return cb(`${distroSlug}-linux-device-001`);
     }
 
     if (command === 'os.getDeviceInfo') {
@@ -193,7 +332,7 @@ const channelObj = {
         brand: 'Linux',
         os: 'linux',
         arch: 'x64',
-        name: 'CentOS-Stream-Linux'
+        name: os.hostname() || `${distroSlug}-Linux`
       };
       setTimeout(() => {
         channelObj.emit('os.onGetDeviceInfo', devInfo);
@@ -219,7 +358,15 @@ const channelObj = {
     }
 
     if (command === 'os.checkNativeSupportFonts') {
-      return cb(['宋体', '微软雅黑', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei']);
+      return cb([
+        '宋体',
+        '微软雅黑',
+        'Noto Sans CJK SC',
+        'Ubuntu',
+        'Droid Sans Fallback',
+        'WenQuanYi Micro Hei',
+        'WenQuanYi Zen Hei'
+      ]);
     }
 
     // App Lifecycle
@@ -300,15 +447,15 @@ const channelObj = {
       return cb(true);
     }
 
-    if (command === 'winhelper.getWindowInfo' || command === 'winhelper.getNativeWindowRect') {
+    if (command === 'winhelper.getWindowInfo' || command === 'winhelper.getNativeWindowRect' || command === 'winhelper.getWindowPosition') {
       return cb({
         status: 'normal',
         isMaxWindow: false,
         isMinimizeWindow: false,
         width: window.innerWidth || 1022,
         height: window.innerHeight || 670,
-        x: 100,
-        y: 100
+        x: window.screenX || 100,
+        y: window.screenY || 100
       });
     }
 
