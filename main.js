@@ -117,6 +117,8 @@ app.commandLine.appendSwitch('disable-setuid-sandbox');
 app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('ozone-platform', process.env.NCM_OZONE_PLATFORM || 'x11');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('disable-http2');
+app.commandLine.appendSwitch('disable-quic');
 if (!process.env.NCM_USE_SYSTEM_PROXY) {
   app.commandLine.appendSwitch('no-proxy-server');
 }
@@ -478,17 +480,20 @@ app.whenReady().then(async () => {
           if (eq !== -1) {
             const k = p.slice(0, eq).trim();
             const v = p.slice(eq + 1).trim();
-            if (k) map.set(k, v);
+            if (k && v) map.set(k, v);
           }
         });
       }
       for (const [name, item] of cookieJar.entries()) {
-        if (!map.has(name) && item.Value) {
-          map.set(name, item.Value);
+        if (!map.has(name) && item.Value && item.Value.trim()) {
+          map.set(name, item.Value.trim());
         }
       }
       delete headers['cookie'];
-      headers['Cookie'] = Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+      const cookieStr = Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+      if (cookieStr) {
+        headers['Cookie'] = cookieStr;
+      }
     }
     callback({ requestHeaders: headers });
   });

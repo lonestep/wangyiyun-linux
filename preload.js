@@ -56,12 +56,14 @@ function tryExtractLoginCookies(text) {
 // Intercept window.fetch to capture QR code login cookies
 const origFetch = window.fetch;
 window.fetch = async function(...args) {
+  const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
   const res = await origFetch.apply(this, args);
   try {
-    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-    if (url.includes('/login')) {
+    if (url.includes('/login') || url.includes('/cellphone') || url.includes('/qr')) {
       const clone = res.clone();
-      clone.text().then(text => tryExtractLoginCookies(text)).catch(() => {});
+      clone.text().then(text => {
+        tryExtractLoginCookies(text);
+      }).catch(() => {});
     }
   } catch (e) {}
   return res;
@@ -440,6 +442,23 @@ const channelObj = {
         text = JSON.stringify(args);
       }
       url = url.replace(/^https?:\/\/[^/]+/, '').replace(/^\/eapi\//, '/api/');
+      if (/^\/(?:e?api\/)?batch(?:\/|\?|$)/.test(url)) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            let modified = false;
+            for (const [k, v] of Object.entries(parsed)) {
+              if (k !== 'header' && k !== 'batchOrder' && typeof v === 'object' && v !== null) {
+                parsed[k] = JSON.stringify(v);
+                modified = true;
+              }
+            }
+            if (modified) {
+              text = JSON.stringify(parsed);
+            }
+          }
+        } catch (e) {}
+      }
       const message = `nobody${url}use${text}md5forencrypt`;
       const digest = crypto.createHash('md5').update(message, 'utf8').digest('hex');
       const data = `${url}-36cd479b6b5-${text}-36cd479b6b5-${digest}`;
